@@ -16,8 +16,8 @@ namespace RemoteUpdate
 		private Thread serverThread;
 		public TaskScheduler Schedular { get; private set; }
 		public IntScriptableObject Port;
-		private readonly string servicePathPropertyName = "Path";
-		private string WebSocketServiceAddMethodName = "AddWebSocketService";
+		public static readonly string ServicePathPropertyName = "Path";
+		public static readonly string WebSocketServiceAddMethodName = "AddWebSocketService";
 
 		private void Awake()
 		{
@@ -50,6 +50,28 @@ namespace RemoteUpdate
 			Schedular = TaskScheduler.FromCurrentSynchronizationContext();
 		}
 
+		private void Update()
+		{
+			SendMessageToClient(PropertyChangeWebsocketBehaviour.Path, "Test Message");
+		}
+
+		private void SendMessageToClient(string path, string message)
+		{
+			if (webSocketServer == null || !webSocketServer.IsListening)
+			{
+				RTUDebug.LogWarning("WebSocket server is not running.");
+				return;
+			}
+
+			if (!webSocketServer.WebSocketServices.TryGetServiceHost(path, out var serviceHost))
+			{
+				RTUDebug.LogWarning($"No WebSocket service registered at path: {path}");
+				return;
+			}
+
+			serviceHost.Sessions.Broadcast(message);
+		}
+
 		private void StartServer(CancellationToken token)
 		{
 			int count = 0;
@@ -78,7 +100,7 @@ namespace RemoteUpdate
 					try
 					{
 						var genericMethod = method.MakeGenericMethod(service);
-						var path = service.GetProperty(servicePathPropertyName).GetValue(service) as string;
+						var path = service.GetProperty(ServicePathPropertyName).GetValue(service) as string;
 						genericMethod.Invoke(webSocketServer, new object[] {path});
 						count++;
 					}
@@ -88,6 +110,7 @@ namespace RemoteUpdate
 							$"Unable to add WebSocket service: {service.Name}, check that the Path is correct");
 					}
 				}
+
 				Debug.Log("webSocketServer.Start()");
 				webSocketServer.Start();
 			}

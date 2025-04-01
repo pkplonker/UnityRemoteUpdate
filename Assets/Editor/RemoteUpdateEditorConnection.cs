@@ -1,58 +1,77 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using RemoteUpdate;
+using RemoteUpdate.Extensions;
 using WebSocketSharp;
+using WebSocketSharp.Server;
 
 namespace RemoteUpdateEditor
 {
 	public class RemoteUpdateEditorConnection
 	{
-		private WebSocket socket;
-		public bool IsConnected => socket?.ReadyState == WebSocketState.Open;
+		private Dictionary<string, WebSocket> socketsDict = new();
+		private readonly IEditorRemoteUpdateController controller;
+		private IEnumerable<WebSocket> sockets => socketsDict.Values;
+
+		public bool IsConnected => socketsDict?.Values.All(x => x.ReadyState == WebSocketState.Open) ?? false;
 		public string IPAddress { get; private set; } = string.Empty;
 		public int Port { get; private set; } = -1;
 
+		public RemoteUpdateEditorConnection(IEditorRemoteUpdateController controller)
+		{
+			this.controller = controller;
+		}
 		public void Connect(string ipAddress, int port, Action completeCallback = null,
 			Action disconnectCallback = null)
 		{
 			IPAddress = ipAddress;
 			Port = port;
-			string behaviour = "Property";
-			try
+			var services = TypeRepository.GetFromBase<WebSocketBehavior>();
+			foreach (var service in services)
 			{
-				socket = new WebSocket($"ws://{ipAddress}:{port}/{behaviour}");
-			}
-			catch (Exception e)
-			{
-				RTUDebug.LogError($"Unable to create game connection {e.Message}");
-				return;
+				try
+				{
+					var path = service.GetProperty(RuntimeRTUController.ServicePathPropertyName)
+						.GetValue(service) as string;
+					socketsDict.Add(path, new WebSocket($"ws://{ipAddress}:{port}{path}"));
+				}
+				catch (Exception e)
+				{
+					RTUDebug.LogError($"Unable to create game connection {e.Message}");
+					return;
+				}
 			}
 
-			socket.OnOpen += (_, args) =>
+			sockets.ForEach(x => x.OnOpen += (_, args) =>
 			{
 				RTUDebug.Log("Connected to the server");
 				completeCallback?.Invoke();
-			};
-			socket.OnClose += (_, args) =>
+			});
+			sockets.ForEach(x => x.OnClose += (_, args) =>
 			{
-				if (args.WasClean)
-				{
+
 					RTUDebug.Log("Closed connection to game");
-				}
-				else
-				{
-					RTUDebug.LogWarning($"Unable to establish connection to game. Reason: {args.Reason}");
-				}
+
 
 				disconnectCallback?.Invoke();
-			};
-			socket.OnMessage += (_, args) => RTUDebug.Log($"Message received: {args.Data}");
-			socket.OnError += (_, args) => { RTUDebug.Log($"Error connection to game: {args.Message}"); };
-
-			socket.Connect();
+			});
+			sockets.ForEach(x => x.OnMessage += OnMessage);
+			sockets.ForEach(x => x.OnError += (_, args) =>
+			{
+				RTUDebug.Log($"Error connection to game: {args.Message}");
+			});
+			sockets.ForEach(x => x.Connect());
 		}
 
-		public void SendMessageToGame(string message)
+		private void OnMessage(object sender, MessageEventArgs e)
+		{
+			RTUDebug.Log($"Message received: {e.Data}");
+			
+		}
+
+		public void SendMessageToGame(string endpoint, string message)
 		{
 			if (!IsConnected)
 			{
@@ -60,15 +79,20 @@ namespace RemoteUpdateEditor
 				return;
 			}
 
-			socket.Send(Encoding.UTF8.GetBytes(message));
+			if (socketsDict.TryGetValue(endpoint, out var socket))
+			{
+				socket.Send(Encoding.UTF8.GetBytes(message));
+			}
 		}
 
 		public void Disconnect()
 		{
-			if (socket != null)
+			foreach (var socket in sockets)
 			{
 				socket.Close();
 			}
+
+			socketsDict.Clear();
 		}
 	}
 }

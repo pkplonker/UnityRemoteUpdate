@@ -6,18 +6,18 @@ using RemoteUpdate.Extensions;
 
 namespace RemoteUpdateEditor
 {
-	public class EditorRemoteUpdateController
+	public class EditorRemoteUpdateController : IEditorRemoteUpdateController
 	{
 		private List<RemoteUpdateEditorConnection> connections = new();
-		private readonly List<IRemoteUpdateEditorHandler> handlers = new();
+		private readonly List<IRemoteUpdateEditorChangeHandler> handlers = new();
 
 		public void CreateProcessors()
 		{
 			ClearHandlers();
-			handlers.AddRange(TypeRepository.GetTypesFromInterface<IRemoteUpdateEditorHandler>()
+			handlers.AddRange(TypeRepository.GetTypesFromInterface<IRemoteUpdateEditorChangeHandler>()
 				.ForEach(x => RTUDebug.Log($"Registering Editor Handlers: {x}"))
 				.Select(x =>
-					(IRemoteUpdateEditorHandler) Activator.CreateInstance(x, new object[] {this}))
+					(IRemoteUpdateEditorChangeHandler) Activator.CreateInstance(x, new object[] {this}))
 				.ToList());
 		}
 
@@ -33,7 +33,7 @@ namespace RemoteUpdateEditor
 
 		public bool HasConnection(string tempValue)
 		{
-			return connections.Any(x => x.IPAddress.Equals(tempValue));
+			return connections.Any(x => x.IPAddress.Equals(tempValue) && x.IsConnected);
 		}
 
 		public void Disconnect(string ip)
@@ -58,7 +58,7 @@ namespace RemoteUpdateEditor
 
 		public void Connect(string ip, int port)
 		{
-			var connection = new RemoteUpdateEditorConnection();
+			var connection = new RemoteUpdateEditorConnection(this);
 			connections.Add(connection);
 			connection.Connect(ip, port, OnConnection(connection),
 				() => OnDisconnect(connection));
