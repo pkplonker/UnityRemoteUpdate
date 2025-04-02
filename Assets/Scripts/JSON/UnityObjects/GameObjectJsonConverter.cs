@@ -1,134 +1,174 @@
-﻿using System;
+﻿using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
-using RemoteUpdate.SerializationDataObjects;
+using System.Reflection;
+using RemoteUpdate;
 using UnityEngine;
 using UnityEngine.Scripting;
 
-namespace RemoteUpdate
+[Preserve]
+[JSONCustomConverter(typeof(GameObjectJsonConverter))]
+public class GameObjectJsonConverter : JsonConverter
 {
-	[Preserve]
-	[JSONCustomConverter(typeof(GameObjectJsonConverter))]
-	public class GameObjectJsonConverter : JsonConverter<GameObject>
+	private HashSet<int> visitedInstanceIDs = new HashSet<int>();
+
+	public override bool CanConvert(Type objectType)
 	{
-		private readonly HashSet<int> serializedGameObjects = new();
+		return typeof(GameObject).IsAssignableFrom(objectType)
+		       || typeof(Component).IsAssignableFrom(objectType);
+	}
 
-		public override void WriteJson(JsonWriter writer, GameObject value, JsonSerializer serializer)
+	public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
+	{
+		if (value == null)
 		{
-			var dto = ToDto(value, serializer);
-			serializer.Serialize(writer, dto);
+			writer.WriteNull();
+			return;
 		}
 
-		public override GameObject ReadJson(JsonReader reader, Type objectType, GameObject existingValue,
-			bool hasExistingValue, JsonSerializer serializer)
+		if (value is GameObject go)
 		{
-			var dto = serializer.Deserialize<GameObjectDTO>(reader);
-			return CreateGameObjectFromDto(dto);
+			bool isRootCall = visitedInstanceIDs.Count == 0;
+			WriteGameObject(writer, go, serializer);
+			if (isRootCall) visitedInstanceIDs.Clear();
 		}
-
-		private GameObjectDTO ToDto(GameObject go, JsonSerializer serializer)
+		else if (value is Component comp)
 		{
-			int id = go.GetInstanceID();
-
-			if (serializedGameObjects.Contains(id))
-			{
-				return new GameObjectDTO
-				{
-					InstanceId = id,
-					IsReference = true
-				};
-			}
-
-			serializedGameObjects.Add(id);
-
-			return new GameObjectDTO
-			{
-				InstanceId = id,
-				Name = go.name,
-				Tag = go.tag,
-				Active = go.activeSelf,
-				Layer = LayerMask.LayerToName(go.layer),
-				Components = go.GetComponents<Component>()
-					.Where(c => c != null && !(c is Transform))
-					.Select(c => SerializeComponent(c, serializer))
-					.ToList(),
-				Children = go.transform.Cast<Transform>()
-					.Select(child => ToDto(child.gameObject, serializer))
-					.ToList()
-			};
+			JObject compData = SerializeComponent(comp, serializer);
+			compData.WriteTo(writer);
 		}
-
-		private ComponentDTO SerializeComponent(Component component, JsonSerializer serializer)
+		else
 		{
-			var json = JObject.FromObject(component, serializer);
-			ReplaceUnityObjectReferences(json);
-			return json.ToObject<ComponentDTO>(serializer);
-		}
-
-		private void ReplaceUnityObjectReferences(JToken token)
-		{
-			if (token.Type == JTokenType.Object)
-			{
-				var obj = (JObject) token;
-				var unityRef = obj.ToObject<UnityEngine.Object>();
-
-				if (unityRef != null)
-				{
-					obj.RemoveAll();
-					obj["instanceId"] = unityRef.GetInstanceID();
-					return;
-				}
-
-				foreach (var property in obj.Properties().ToList())
-				{
-					ReplaceUnityObjectReferences(property.Value);
-				}
-			}
-			else if (token.Type == JTokenType.Array)
-			{
-				var array = (JArray) token;
-				for (int i = 0; i < array.Count; i++)
-				{
-					ReplaceUnityObjectReferences(array[i]);
-				}
-			}
-		}
-
-		private GameObject CreateGameObjectFromDto(GameObjectDTO dto)
-		{
-			var go = new GameObject(dto.Name)
-			{
-				tag = dto.Tag,
-				layer = LayerMask.NameToLayer(dto.Layer)
-			};
-			go.SetActive(dto.Active);
-
-			foreach (var compDto in dto.Components)
-			{
-				var type = Type.GetType(compDto.Type);
-				if (type == null || !typeof(Component).IsAssignableFrom(type))
-					continue;
-
-				try
-				{
-					var comp = go.AddComponent(type);
-					new ComponentJsonConverter().ApplyDtoToComponent(comp, compDto);
-				}
-				catch (Exception e)
-				{
-					Debug.LogWarning($"Failed to add/restore component {compDto.Type}: {e.Message}");
-				}
-			}
-
-			foreach (var childDto in dto.Children)
-			{
-				var child = CreateGameObjectFromDto(childDto);
-				child.transform.SetParent(go.transform);
-			}
-
-			return go;
+			JToken t = JToken.FromObject(value, serializer);
+			t.WriteTo(writer);
 		}
 	}
+
+	private void WriteGameObject(JsonWriter writer, GameObject go, JsonSerializer serializer)
+	{
+		int id = go.GetInstanceID();
+		if (visitedInstanceIDs.Contains(id))
+		{
+			JObject referenceObj = new JObject
+			{
+				["instanceId"] = id,
+				["isReference"] = true
+			};
+			referenceObj.WriteTo(writer);
+			return;
+		}
+
+		visitedInstanceIDs.Add(id);
+
+		JObject obj = new JObject();
+		obj["instanceId"] = id;
+		obj["name"] = go.name;
+		obj["tag"] = go.tag;
+		obj["layer"] = go.layer;
+		obj["activeSelf"] = go.activeSelf;
+
+		JArray componentsArray = new JArray();
+		foreach (Component component in go.GetComponents<Component>())
+		{
+			JObject compData = SerializeComponent(component, serializer);
+			componentsArray.Add(compData);
+		}
+
+		obj["components"] = componentsArray;
+
+		// children?
+
+		obj.WriteTo(writer);
+	}
+
+	private JObject SerializeComponent(Component comp, JsonSerializer serializer)
+	{
+		Type type = comp.GetType();
+		JObject jObj = new JObject();
+
+		jObj["type"] = type.Name;
+		jObj["instanceId"] = comp.GetInstanceID();
+
+		foreach (FieldInfo field in type.GetFields(BindingFlags.Instance | BindingFlags.Public))
+		{
+			if (field.IsDefined(typeof(NonSerializedAttribute), true)
+			    || field.IsDefined(typeof(JsonIgnoreAttribute), true))
+			{
+				continue;
+			}
+
+			string fieldName = field.Name;
+			object fieldValue = field.GetValue(comp);
+			jObj[fieldName] = JToken.FromObject(SanitizeUnityReference(fieldValue, serializer));
+		}
+
+		foreach (PropertyInfo prop in type.GetProperties(BindingFlags.Instance | BindingFlags.Public).Where(x=>x.CanRead && x.CanWrite))
+		{
+			if (!prop.CanRead || prop.GetIndexParameters().Length > 0)
+				continue;
+
+			string propName = prop.Name;
+			if (propName == "gameObject" || propName == "transform" || propName == "attachedRigidbody")
+				continue;
+			if (propName == "name" || propName == "tag" || propName == "hideFlags")
+				continue;
+
+			object propValue;
+			try
+			{
+				propValue = prop.GetValue(comp, null);
+			}
+			catch (Exception)
+			{
+				continue;
+			}
+
+			var val = SanitizeUnityReference(propValue, serializer);
+			jObj[propName] = val != null
+				? JToken.FromObject(val, serializer)
+				: JValue.CreateNull();
+		}
+
+		return jObj;
+	}
+
+	private object SanitizeUnityReference(object obj, JsonSerializer serializer)
+	{
+		if (obj == null)
+			return null;
+
+		if (obj is UnityEngine.Object unityObj)
+		{
+			JObject refJson = new JObject();
+			refJson["instanceId"] = unityObj.GetInstanceID();
+			refJson["type"] = unityObj.GetType().Name;
+			if (unityObj is GameObject && visitedInstanceIDs.Contains(unityObj.GetInstanceID()))
+			{
+				refJson["isReference"] = true;
+			}
+
+			return refJson;
+		}
+
+		if (obj is IEnumerable enumerable && !(obj is string))
+		{
+			JArray array = new JArray();
+			foreach (var item in enumerable)
+			{
+				array.Add(JToken.FromObject(SanitizeUnityReference(item, serializer), serializer));
+			}
+
+			return array;
+		}
+
+		return obj;
+	}
+
+	public override bool CanRead => false;
+
+	public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
+		=> throw new NotImplementedException("ReadJson is not implemented for GameObjectJsonConverter.");
 }
