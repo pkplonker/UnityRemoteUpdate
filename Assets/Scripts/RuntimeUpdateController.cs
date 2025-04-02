@@ -1,34 +1,47 @@
 using System;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
+using RemoteUpdate.Threading;
 using UnityEngine;
 using WebSocketSharp.Server;
 
 namespace RemoteUpdate
 {
-	public class RuntimeRTUController : MonoBehaviour
+	public class RuntimeUpdateController : MonoBehaviour
 	{
 		private CancellationTokenSource cancellationTokenSource;
 		private WebSocketServer webSocketServer;
 		private Thread serverThread;
 		public TaskScheduler Schedular { get; private set; }
+		public JsonSerializerSettings JsonSettings;
+
 		public IntScriptableObject Port;
+		private static readonly ConcurrentQueue<MainThreadTask<object>> mainThreadQueue = new();
 		public static readonly string ServicePathPropertyName = "Path";
 		public static readonly string WebSocketServiceAddMethodName = "AddWebSocketService";
+		public static RuntimeUpdateController Instance { get; private set; }
 
 		private void Awake()
 		{
-			Debug.Log("awake");
+			if (Instance != null && Instance != this)
+			{
+				Destroy(gameObject);
+				return;
+			}
 
+			Instance = this;
+			DontDestroyOnLoad(gameObject);
 			gameObject.hideFlags = HideFlags.HideInHierarchy | HideFlags.HideInInspector;
+			JsonSettings = new JSONSettingsCreator().Create();
 		}
 
 		void Start()
 		{
-			Debug.Log("start");
 
 			cancellationTokenSource = new CancellationTokenSource();
 			serverThread = new Thread(() =>
@@ -36,7 +49,6 @@ namespace RemoteUpdate
 				try
 				{
 					StartServer(cancellationTokenSource.Token);
-					Debug.Log("Server Created");
 				}
 				catch
 				{
@@ -50,12 +62,53 @@ namespace RemoteUpdate
 			Schedular = TaskScheduler.FromCurrentSynchronizationContext();
 		}
 
-		private void Update()
+		public Task<T> DispatchToMainThread<T>(Func<T> work)
 		{
-			SendMessageToClient(PropertyChangeWebsocketBehaviour.Path, "Test Message");
+			var task = new MainThreadTask<object>
+			{
+				Work = () => work(),
+				CompletionSource = new TaskCompletionSource<object>()
+			};
+
+			mainThreadQueue.Enqueue(task);
+			return task.CompletionSource.Task.ContinueWith(t => (T) t.Result);
+		}
+		public Task DispatchToMainThread(Action work)
+		{
+			var task = new MainThreadTask<object>
+			{
+				Work = () =>
+				{
+					work();
+					return null;
+				},
+				CompletionSource = new TaskCompletionSource<object>()
+			};
+
+			mainThreadQueue.Enqueue(task);
+			return task.CompletionSource.Task;
 		}
 
-		private void SendMessageToClient(string path, string message)
+
+		private void Update()
+		{
+			//SendMessageToClient(PropertyChangeWebsocketBehaviour.Path, "Test Message");
+			while (mainThreadQueue.TryDequeue(out var task))
+			{
+				try
+				{
+					
+					var result = task.Work();
+					task.CompletionSource.SetResult(result);
+				}
+				catch (Exception ex)
+				{
+					task.CompletionSource.SetException(ex);
+				}
+			}
+		}
+
+		public void SendMessageToClient(string path, string message)
 		{
 			if (webSocketServer == null || !webSocketServer.IsListening)
 			{
@@ -88,9 +141,7 @@ namespace RemoteUpdate
 					RTUDebug.LogWarning("Not connected to network - unable to support RTU");
 					return;
 				}
-
-				Debug.Log("server ini");
-
+				
 				webSocketServer = new WebSocketServer(IPAddress.Any, Port.Value);
 				var services = TypeRepository.GetFromBase<WebSocketBehavior>();
 				var method = webSocketServer.GetType().GetMethods()
@@ -111,7 +162,6 @@ namespace RemoteUpdate
 					}
 				}
 
-				Debug.Log("webSocketServer.Start()");
 				webSocketServer.Start();
 			}
 			catch (Exception e)

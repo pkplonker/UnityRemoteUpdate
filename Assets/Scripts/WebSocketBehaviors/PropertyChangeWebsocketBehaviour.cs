@@ -9,8 +9,6 @@ namespace RemoteUpdate
 {
 	public class PropertyChangeWebsocketBehaviour : WebSocketBehavior
 	{
-		private readonly JsonSerializerSettings jsonSettings = new JSONSettingsCreator().Create();
-
 		public static string Path { get; } = "/Property";
 
 		protected override void OnMessage(MessageEventArgs args)

@@ -33,7 +33,7 @@ namespace RemoteUpdateEditor
 			{
 				try
 				{
-					var path = service.GetProperty(RuntimeRTUController.ServicePathPropertyName)
+					var path = service.GetProperty(RuntimeUpdateController.ServicePathPropertyName)
 						.GetValue(service) as string;
 					socketsDict.Add(path, new WebSocket($"ws://{ipAddress}:{port}{path}"));
 				}
