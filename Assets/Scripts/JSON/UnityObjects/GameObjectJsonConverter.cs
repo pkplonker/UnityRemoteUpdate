@@ -5,6 +5,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using JetBrains.Annotations;
 using RemoteUpdate;
 using UnityEngine;
 using UnityEngine.Scripting;
@@ -13,7 +14,17 @@ using UnityEngine.Scripting;
 [JSONCustomConverter(typeof(GameObjectJsonConverter))]
 public class GameObjectJsonConverter : JsonConverter
 {
+	private readonly Dictionary<int, UnityEngine.Object> deserializedObjects = new();
+	private readonly List<(Transform child, int parentId)> pendingParents = new();
+	private readonly List<DeferredReference> deferredReferences = new();
 	private HashSet<int> visitedInstanceIDs = new HashSet<int>();
+
+	private struct DeferredReference
+	{
+		public UnityEngine.Object TargetObject;
+		public MemberInfo Member;
+		public JToken ValueToken;
+	}
 
 	public override bool CanConvert(Type objectType)
 	{
@@ -38,7 +49,10 @@ public class GameObjectJsonConverter : JsonConverter
 		else if (value is Component comp)
 		{
 			JObject compData = SerializeComponent(comp, serializer);
-			compData.WriteTo(writer);
+			if (compData != null)
+			{
+				compData.WriteTo(writer);
+			}
 		}
 		else
 		{
@@ -69,26 +83,41 @@ public class GameObjectJsonConverter : JsonConverter
 		obj["tag"] = go.tag;
 		obj["layer"] = go.layer;
 		obj["activeSelf"] = go.activeSelf;
+		var t = go.transform;
+		JObject transformData = new JObject
+		{
+			["position"] = JObject.FromObject(t.localPosition, serializer),
+			["rotation"] = JObject.FromObject(t.localEulerAngles, serializer),
+			["scale"] = JObject.FromObject(t.localScale, serializer)
+		};
 
+		obj["transform"] = transformData;
 		JArray componentsArray = new JArray();
 		foreach (Component component in go.GetComponents<Component>())
 		{
 			JObject compData = SerializeComponent(component, serializer);
-			componentsArray.Add(compData);
+			if (compData != null)
+			{
+				componentsArray.Add(compData);
+			}
 		}
 
 		obj["components"] = componentsArray;
 
-		// children?
+		if (t.parent != null)
+		{
+			obj["parentId"] = t.parent.gameObject.GetInstanceID();
+		}
 
 		obj.WriteTo(writer);
 	}
 
+	[CanBeNull]
 	private JObject SerializeComponent(Component comp, JsonSerializer serializer)
 	{
 		Type type = comp.GetType();
 		JObject jObj = new JObject();
-
+		if (type == typeof(Transform)) return null;
 		jObj["type"] = type.Name;
 		jObj["instanceId"] = comp.GetInstanceID();
 
@@ -105,7 +134,8 @@ public class GameObjectJsonConverter : JsonConverter
 			jObj[fieldName] = JToken.FromObject(SanitizeUnityReference(fieldValue, serializer));
 		}
 
-		foreach (PropertyInfo prop in type.GetProperties(BindingFlags.Instance | BindingFlags.Public).Where(x=>x.CanRead && x.CanWrite))
+		foreach (PropertyInfo prop in type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
+			         .Where(x => x.CanRead && x.CanWrite))
 		{
 			if (!prop.CanRead || prop.GetIndexParameters().Length > 0)
 				continue;
@@ -170,5 +200,160 @@ public class GameObjectJsonConverter : JsonConverter
 	public override bool CanRead => false;
 
 	public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
-		=> throw new NotImplementedException("ReadJson is not implemented for GameObjectJsonConverter.");
+	{
+		var jo = JObject.Load(reader);
+
+		if (jo.TryGetValue("isReference", out var isRef) && isRef.Value<bool>())
+		{
+			int refId = jo["instanceId"]?.Value<int>() ?? -1;
+			if (refId != -1 && deserializedObjects.TryGetValue(refId, out var existing))
+				return existing;
+			return null;
+		}
+
+		var go = new GameObject(jo["name"]?.ToString() ?? "Unnamed");
+		if (jo.TryGetValue("tag", out var tagToken)) go.tag = tagToken.ToString();
+		if (jo.TryGetValue("layer", out var layerToken)) go.layer = layerToken.Value<int>();
+		if (jo.TryGetValue("activeSelf", out var activeToken)) go.SetActive(activeToken.Value<bool>());
+
+		int id = jo["instanceId"]?.Value<int>() ?? go.GetInstanceID();
+		deserializedObjects[id] = go;
+
+		if (jo.TryGetValue("parentId", out var parentToken))
+		{
+			pendingParents.Add((go.transform, parentToken.Value<int>()));
+		}
+
+		if (jo.TryGetValue("transform", out var transformToken) && transformToken is JObject transformObj)
+		{
+			var t = go.transform;
+
+			if (transformObj.TryGetValue("position", out var pos))
+				t.localPosition = pos.ToObject<Vector3>(serializer);
+
+			if (transformObj.TryGetValue("rotation", out var rot))
+				t.localEulerAngles = rot.ToObject<Vector3>(serializer);
+
+			if (transformObj.TryGetValue("scale", out var scale))
+				t.localScale = scale.ToObject<Vector3>(serializer);
+		}
+
+		if (jo.TryGetValue("components", out var compsToken) && compsToken is JArray components)
+		{
+			foreach (var compToken in components)
+			{
+				var comp = DeserializeComponent((JObject) compToken, go);
+				if (comp != null)
+					deserializedObjects[comp.GetInstanceID()] = comp;
+			}
+		}
+
+		return go;
+	}
+
+	private object ConvertToken(Type targetType, JToken token)
+	{
+		if (token.Type == JTokenType.Object && token["instanceId"] != null)
+		{
+			int refId = token["instanceId"].Value<int>();
+
+			if (deserializedObjects.TryGetValue(refId, out var referenced))
+			{
+				return referenced;
+			}
+
+			return null;
+		}
+
+		return token.ToObject(targetType);
+	}
+
+	private Component DeserializeComponent(JObject compObj, GameObject owner)
+	{
+		if (!compObj.TryGetValue("type", out var typeToken)) return null;
+		var typeName = typeToken.ToString();
+		var type = TypeRepository.GetTypes()
+			.FirstOrDefault(t => t.Name == typeName || t.FullName == typeName);
+
+		if (type == null || !typeof(Component).IsAssignableFrom(type)) return null;
+
+		var comp = owner.AddComponent(type);
+
+		foreach (var prop in compObj.Properties())
+		{
+			if (prop.Name == "type" || prop.Name == "instanceId") continue;
+
+			var member = type.GetMember(prop.Name, BindingFlags.Public | BindingFlags.Instance).FirstOrDefault();
+
+			if (member is FieldInfo field)
+			{
+				try
+				{
+					var value = ConvertToken(field.FieldType, prop.Value);
+
+					if (!field.IsStatic)
+					{
+						field.SetValue(comp, value);
+					}
+				}
+				catch (Exception ex)
+				{
+					RTUDebug.LogWarning($"Failed to set field '{prop.Name}' on {type.Name}: {ex.Message}");
+				}
+			}
+			else if (member is PropertyInfo property && property.CanWrite)
+			{
+				try
+				{
+					var value = ConvertToken(property.PropertyType, prop.Value);
+
+					if (!property.GetMethod.IsStatic)
+					{
+						property.SetValue(comp, value);
+					}
+				}
+				catch (Exception ex)
+				{
+					RTUDebug.LogWarning($"Failed to set property '{prop.Name}' on {type.Name}: {ex.Message}");
+				}
+			}
+		}
+
+		return comp;
+	}
+
+	private bool IsReferenceToken(JToken token)
+	{
+		return token.Type == JTokenType.Object && token["instanceId"] != null;
+	}
+
+	public void ResolveDeferredReferences()
+	{
+		foreach (var (child, parentId) in pendingParents)
+		{
+			if (deserializedObjects.TryGetValue(parentId, out var parentObj) && parentObj is GameObject parentGo)
+			{
+				child.SetParent(parentGo.transform, false);
+			}
+		}
+
+		pendingParents.Clear();
+
+		foreach (var def in deferredReferences)
+		{
+			if (def.ValueToken["instanceId"] is JToken idToken)
+			{
+				int refId = idToken.Value<int>();
+				if (deserializedObjects.TryGetValue(refId, out var targetRef))
+				{
+					if (def.Member is FieldInfo field)
+						field.SetValue(def.TargetObject, targetRef);
+					else if (def.Member is PropertyInfo prop)
+						prop.SetValue(def.TargetObject, targetRef);
+				}
+			}
+		}
+
+		deferredReferences.Clear();
+	}
 }

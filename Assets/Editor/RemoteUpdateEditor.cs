@@ -11,7 +11,7 @@ namespace RemoteUpdateEditor
 	public class RTUEditorWindow : EditorWindow
 	{
 		private List<string> potentialConnections = new();
-		private EditorRemoteUpdateController controller = new();
+		private EditorController controller = new();
 		private string gamePath = "S:\\Users\\pkplo\\OneDrive\\Desktop\\RemoteUpdate\\RemoteUpdate.exe";
 		private IntScriptableObject PortSO;
 

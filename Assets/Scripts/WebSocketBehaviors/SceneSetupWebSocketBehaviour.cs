@@ -31,10 +31,8 @@ namespace RemoteUpdate
 					return messages;
 				}).GetAwaiter().GetResult();
 
-			foreach (var obj in serializedObjects)
-			{
-				RuntimeUpdateController.Instance.SendMessageToClient(Path, obj);
-			}
+			var combined = "[" + string.Join(",", serializedObjects) + "]";
+			RuntimeUpdateController.Instance.SendMessageToClient(Path, combined);
 		}
 	}
 }

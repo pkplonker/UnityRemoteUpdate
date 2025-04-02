@@ -6,19 +6,27 @@ using RemoteUpdate.Extensions;
 
 namespace RemoteUpdateEditor
 {
-	public class EditorRemoteUpdateController : IEditorRemoteUpdateController
+	public class EditorController : IEditorController
 	{
 		private List<RemoteUpdateEditorConnection> connections = new();
-		private readonly List<IRemoteUpdateEditorChangeHandler> handlers = new();
+		private Dictionary<string, IEditorChangeHandler> handlers = new();
+
+		public EditorController()
+		{
+			CreateProcessors();
+		}
 
 		public void CreateProcessors()
 		{
 			ClearHandlers();
-			handlers.AddRange(TypeRepository.GetTypesFromInterface<IRemoteUpdateEditorChangeHandler>()
-				.ForEach(x => RTUDebug.Log($"Registering Editor Handlers: {x}"))
-				.Select(x =>
-					(IRemoteUpdateEditorChangeHandler) Activator.CreateInstance(x, new object[] {this}))
-				.ToList());
+			handlers = TypeRepository.GetTypesFromInterface<IEditorChangeHandler>()
+				.Select(type =>
+				{
+					var instance = (IEditorChangeHandler) Activator.CreateInstance(type, new object[] {this});
+					RTUDebug.Log($"Registering Editor Handler: {type} with path: {instance.Path}");
+					return new KeyValuePair<string, IEditorChangeHandler>(instance.Path, instance);
+				})
+				.ToDictionary(pair => pair.Key, pair => pair.Value);
 		}
 
 		private void ClearHandlers()
@@ -64,7 +72,7 @@ namespace RemoteUpdateEditor
 				() => OnDisconnect(connection));
 		}
 
-		private Action OnConnection( RemoteUpdateEditorConnection connection)
+		private Action OnConnection(RemoteUpdateEditorConnection connection)
 		{
 			return null;
 		}
@@ -72,6 +80,18 @@ namespace RemoteUpdateEditor
 		private void OnDisconnect(RemoteUpdateEditorConnection connection)
 		{
 			return;
+		}
+
+		public void OnMessage(string endpoint, string data)
+		{
+			if (handlers.TryGetValue(endpoint, out var handler))
+			{
+				handler.OnMessage(data);
+			}
+			else
+			{
+				RTUDebug.LogError($"Missing handler for endpoint {endpoint}");
+			}
 		}
 	}
 }

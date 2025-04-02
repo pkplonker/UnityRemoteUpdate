@@ -12,14 +12,14 @@ namespace RemoteUpdateEditor
 	public class RemoteUpdateEditorConnection
 	{
 		private Dictionary<string, WebSocket> socketsDict = new();
-		private readonly IEditorRemoteUpdateController controller;
+		private readonly IEditorController controller;
 		private IEnumerable<WebSocket> sockets => socketsDict.Values;
 
 		public bool IsConnected => socketsDict?.Values.All(x => x.ReadyState == WebSocketState.Open) ?? false;
 		public string IPAddress { get; private set; } = string.Empty;
 		public int Port { get; private set; } = -1;
 
-		public RemoteUpdateEditorConnection(IEditorRemoteUpdateController controller)
+		public RemoteUpdateEditorConnection(IEditorController controller)
 		{
 			this.controller = controller;
 		}
@@ -67,8 +67,10 @@ namespace RemoteUpdateEditor
 
 		private void OnMessage(object sender, MessageEventArgs e)
 		{
+			var url = (sender as WebSocket).Url.ToString();
+			var path = url.Substring(url.LastIndexOf('/'), url.Length - url.LastIndexOf('/'));
 			RTUDebug.Log($"Message received: {e.Data}");
-			
+			controller.OnMessage(path, e.Data);
 		}
 
 		public void SendMessageToGame(string endpoint, string message)
