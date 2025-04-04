@@ -7,6 +7,7 @@ using System.Linq;
 using System.Reflection;
 using JetBrains.Annotations;
 using RemoteUpdate;
+using RemoteUpdate.Extensions;
 using UnityEngine;
 using UnityEngine.Scripting;
 
@@ -120,45 +121,25 @@ public class GameObjectJsonConverter : JsonConverter
 		if (type == typeof(Transform)) return null;
 		jObj["type"] = type.Name;
 		jObj["instanceId"] = comp.GetInstanceID();
-
-		foreach (FieldInfo field in type.GetFields(BindingFlags.Instance | BindingFlags.Public))
+		var adapters = MemberAdaptorUtils.GetMemberAdapters(type);
+		foreach (var adapter in adapters)
 		{
-			if (field.IsDefined(typeof(NonSerializedAttribute), true)
-			    || field.IsDefined(typeof(JsonIgnoreAttribute), true))
-			{
+			if (adapter.Name == "gameObject" || adapter.Name == "transform" || adapter.Name == "attachedRigidbody" ||
+			    adapter.Name == "name" || adapter.Name == "tag" || adapter.Name == "hideFlags")
 				continue;
-			}
-
-			string fieldName = field.Name;
-			object fieldValue = field.GetValue(comp);
-			jObj[fieldName] = JToken.FromObject(SanitizeUnityReference(fieldValue, serializer));
-		}
-
-		foreach (PropertyInfo prop in type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
-			         .Where(x => x.CanRead && x.CanWrite))
-		{
-			if (!prop.CanRead || prop.GetIndexParameters().Length > 0)
-				continue;
-
-			string propName = prop.Name;
-			if (propName == "gameObject" || propName == "transform" || propName == "attachedRigidbody")
-				continue;
-			if (propName == "name" || propName == "tag" || propName == "hideFlags")
-				continue;
-
-			object propValue;
+			object memberVal;
 			try
 			{
-				propValue = prop.GetValue(comp, null);
+				memberVal = adapter.GetValue(comp);
 			}
 			catch (Exception)
 			{
 				continue;
 			}
 
-			var val = SanitizeUnityReference(propValue, serializer);
-			jObj[propName] = val != null
-				? JToken.FromObject(val, serializer)
+			var sanitizedVal = SanitizeUnityReference(memberVal, serializer);
+			jObj[adapter.Name] = sanitizedVal != null
+				? JToken.FromObject(sanitizedVal, serializer)
 				: JValue.CreateNull();
 		}
 
