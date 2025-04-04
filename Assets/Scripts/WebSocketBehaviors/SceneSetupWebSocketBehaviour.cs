@@ -3,6 +3,7 @@ using System.Linq;
 using Newtonsoft.Json;
 using NUnit.Framework;
 using RemoteUpdate.Extensions;
+using UnityEngine;
 using WebSocketSharp;
 using WebSocketSharp.Server;
 
@@ -22,7 +23,7 @@ namespace RemoteUpdate
 				{
 					var gos = GameObjectExtensions.GetAllGameObjects();
 					var messages = new List<string>();
-					foreach (var go in gos)
+					foreach (var go in gos.Where(x=>(x.hideFlags & HideFlags.HideInInspector)==0))
 					{
 						var message = go.Serialize(RuntimeUpdateController.Instance.JsonSettings);
 						messages.Add(message);

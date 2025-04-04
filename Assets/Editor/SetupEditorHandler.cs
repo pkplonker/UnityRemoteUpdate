@@ -1,9 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using RemoteUpdate;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace RemoteUpdateEditor
 {
@@ -22,30 +24,37 @@ namespace RemoteUpdateEditor
 			try
 			{
 				var array = JArray.Parse(data);
-				var serializer = JsonSerializer.Create(RuntimeUpdateController.Instance.JsonSettings);
 				var converter = new GameObjectJsonConverter();
-
-				List<GameObject> gameObjects = EditorMainThreadDispatcher.Dispatch(() =>
+				var scene = controller.GetScene();
+				if (scene != null)
 				{
-					var result = new List<GameObject>();
-
-					foreach (var token in array)
+					EditorMainThreadDispatcher.Dispatch(() =>
 					{
-						var go =
-							converter.ReadJson(token.CreateReader(), typeof(GameObject), null,
-								serializer) as GameObject;
-						if (go != null)
+						var serializer = JsonSerializer.Create(controller.JsonSettings);
+
+						var gameObjects = new List<GameObject>();
+
+						foreach (var token in array)
 						{
-							RTUDebug.Log(
-								$"[SetupEditorHandler] Deserialized GameObject: {go.name} (ID: {go.GetInstanceID()})");
-							result.Add(go);
+							var go =
+								converter.ReadJson(token.CreateReader(), typeof(GameObject), null,
+									serializer) as GameObject;
+							if (go != null)
+							{
+								RTUDebug.Log(
+									$"[SetupEditorHandler] Deserialized GameObject: {go.name} (ID: {go.GetInstanceID()})");
+								gameObjects.Add(go);
+							}
 						}
-					}
 
-					converter.ResolveDeferredReferences();
+						converter.ResolveDeferredReferences();
 
-					return result;
-				}).GetAwaiter().GetResult();
+						foreach (var go in gameObjects.Where(x => x.transform.parent == null))
+						{
+							SceneManager.MoveGameObjectToScene(go, controller.GetScene().Value);
+						}
+					}).GetAwaiter().GetResult();
+				}
 			}
 			catch (Exception ex)
 			{

@@ -107,7 +107,7 @@ namespace RemoteUpdateEditor
 						newConnections.Add(tempValue);
 					}
 				}
-				catch (Exception e) { }
+				catch (Exception) { }
 
 				EditorGUILayout.EndHorizontal();
 			}
@@ -147,6 +147,10 @@ namespace RemoteUpdateEditor
 			if (GUILayout.Button("Reload processors"))
 			{
 				controller.CreateProcessors();
+			}
+			if (GUILayout.Button("Show Scene"))
+			{
+				controller.ShowScene();
 			}
 
 			EditorGUILayout.EndHorizontal();

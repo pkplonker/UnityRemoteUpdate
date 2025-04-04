@@ -1,8 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
 using RemoteUpdate;
-using RemoteUpdate.Extensions;
+using RemoteUpdate.Threading;
+using UnityEditor;
+using UnityEngine.SceneManagement;
 
 namespace RemoteUpdateEditor
 {
@@ -10,9 +14,28 @@ namespace RemoteUpdateEditor
 	{
 		private List<RemoteUpdateEditorConnection> connections = new();
 		private Dictionary<string, IEditorChangeHandler> handlers = new();
+		public event Action<RemoteUpdateScene> SceneChanged;
+
+		private RemoteUpdateScene scene;
+		private readonly TaskScheduler scheduler;
+		private bool setup;
+		public JsonSerializerSettings JsonSettings { get; } = new JSONSettingsCreator().Create();
+		
+
+		public RemoteUpdateScene Scene
+		{
+			get => scene;
+			private set
+			{
+				scene = value;
+				SceneChanged?.Invoke(scene);
+			}
+		}
 
 		public EditorController()
 		{
+			AssemblyReloadEvents.beforeAssemblyReload += () => Scene?.Close();
+			scheduler = TaskScheduler.FromCurrentSynchronizationContext();
 			CreateProcessors();
 		}
 
@@ -39,10 +62,18 @@ namespace RemoteUpdateEditor
 			handlers.Clear();
 		}
 
-		public bool HasConnection(string tempValue)
+		private void CloseScene() => Scene?.Close();
+
+		public void ShowScene() => Scene?.ShowScene();
+
+		private void NewScene()
 		{
-			return connections.Any(x => x.IPAddress.Equals(tempValue) && x.IsConnected);
+			Scene = new RemoteUpdateScene(scheduler);
+			Scene.ShowScene();
 		}
+
+		public bool HasConnection(string ip) =>
+			connections.Any(x => x.IPAddress.Equals(ip) && x.IsConnected);
 
 		public void Disconnect(string ip)
 		{
@@ -62,25 +93,24 @@ namespace RemoteUpdateEditor
 			connections.ForEach(x => Disconnect(x.IPAddress));
 		}
 
-		private void CloseScene() { }
-
 		public void Connect(string ip, int port)
 		{
 			var connection = new RemoteUpdateEditorConnection(this);
 			connections.Add(connection);
-			connection.Connect(ip, port, OnConnection(connection),
+			connection.Connect(ip, port, () => OnConnection(connection),
 				() => OnDisconnect(connection));
 		}
 
-		private Action OnConnection(RemoteUpdateEditorConnection connection)
+		private async void OnConnection(RemoteUpdateEditorConnection connection)
 		{
-			return null;
+			if (!setup)
+			{
+				await ThreadingHelper.ActionOnSchedulerAsync(() => Selection.objects = null, scheduler);
+				NewScene();
+			}
 		}
 
-		private void OnDisconnect(RemoteUpdateEditorConnection connection)
-		{
-			return;
-		}
+		private void OnDisconnect(RemoteUpdateEditorConnection connection) => setup = false;
 
 		public void OnMessage(string endpoint, string data)
 		{
@@ -93,5 +123,7 @@ namespace RemoteUpdateEditor
 				RTUDebug.LogError($"Missing handler for endpoint {endpoint}");
 			}
 		}
+
+		public Scene? GetScene() => scene.GetScene();
 	}
 }
